@@ -794,6 +794,54 @@ func (lbaas *LbaasV2) EnsureLoadBalancer(ctx context.Context, clusterName string
 		return nil, fmt.Errorf("failed to loadbalance ACTIVE provisioning status %v: %v", provisioningStatus, err)
 	}
 
+	portID := loadbalancer.VipPortID
+	floatIP, err := getFloatingIPByPortID(lbaas.network, portID)
+	if err != nil && err != ErrNotFound {
+		return nil, fmt.Errorf("error getting floating ip for port %s: %v", portID, err)
+	}
+	if floatIP == nil && floatingPool != "" && !internalAnnotation {
+		loadBalancerIP := apiService.Spec.LoadBalancerIP
+		needCreate := true
+		// check first does floatingip exist already in project, otherwise try to create new one
+		if loadBalancerIP != "" {
+			floatingip, err := getFloatingIPByFloatingIP(lbaas.network, loadBalancerIP)
+			if err != nil {
+				glog.V(4).Infof("could not find floating ip %s from project: %v", floatingip, err)
+			} else {
+				if len(floatingip.PortID) == 0 {
+					floatUpdateOpts := floatingips.UpdateOpts{
+						PortID: &portID,
+					}
+					floatIP, err = floatingips.Update(lbaas.network, floatingip.ID, floatUpdateOpts).Extract()
+					if err != nil {
+						return nil, fmt.Errorf("error updating LB floatingip %+v: %v", floatUpdateOpts, err)
+					} else {
+						needCreate = false
+					}
+				} else {
+					return nil, fmt.Errorf("floatingip is attached already to another port")
+				}
+			}
+		}
+		if needCreate {
+			glog.V(4).Infof("Creating floating ip for loadbalancer %s port %s", loadbalancer.ID, portID)
+			floatIPOpts := floatingips.CreateOpts{
+				FloatingNetworkID: floatingPool,
+				PortID:            portID,
+			}
+
+			if loadBalancerIP != "" {
+				glog.V(4).Infof("creating a new floating ip %s", loadBalancerIP)
+				floatIPOpts.FloatingIP = loadBalancerIP
+			}
+
+			floatIP, err = floatingips.Create(lbaas.network, floatIPOpts).Extract()
+			if err != nil {
+				return nil, fmt.Errorf("error creating LB floatingip %+v: %v", floatIPOpts, err)
+			}
+		}
+	}
+
 	lbmethod := v2pools.LBMethod(lbaas.opts.LBMethod)
 	if lbmethod == "" {
 		lbmethod = v2pools.LBMethodRoundRobin
@@ -1024,54 +1072,6 @@ func (lbaas *LbaasV2) EnsureLoadBalancer(ctx context.Context, clusterName string
 			return nil, fmt.Errorf("failed to loadbalance ACTIVE provisioning status %v: %v", provisioningStatus, err)
 		}
 		glog.V(2).Infof("Deleted obsolete listener: %s", listener.ID)
-	}
-
-	portID := loadbalancer.VipPortID
-	floatIP, err := getFloatingIPByPortID(lbaas.network, portID)
-	if err != nil && err != ErrNotFound {
-		return nil, fmt.Errorf("error getting floating ip for port %s: %v", portID, err)
-	}
-	if floatIP == nil && floatingPool != "" && !internalAnnotation {
-		loadBalancerIP := apiService.Spec.LoadBalancerIP
-		needCreate := true
-		// check first does floatingip exist already in project, otherwise try to create new one
-		if loadBalancerIP != "" {
-			floatingip, err := getFloatingIPByFloatingIP(lbaas.network, loadBalancerIP)
-			if err != nil {
-				glog.V(4).Infof("could not find floating ip %s from project: %v", floatingip, err)
-			} else {
-				if len(floatingip.PortID) == 0 {
-					floatUpdateOpts := floatingips.UpdateOpts{
-						PortID: &portID,
-					}
-					floatIP, err = floatingips.Update(lbaas.network, floatingip.ID, floatUpdateOpts).Extract()
-					if err != nil {
-						return nil, fmt.Errorf("error updating LB floatingip %+v: %v", floatUpdateOpts, err)
-					} else {
-						needCreate = false
-					}
-				} else {
-					return nil, fmt.Errorf("floatingip is attached already to another port")
-				}
-			}
-		}
-		if needCreate {
-			glog.V(4).Infof("Creating floating ip for loadbalancer %s port %s", loadbalancer.ID, portID)
-			floatIPOpts := floatingips.CreateOpts{
-				FloatingNetworkID: floatingPool,
-				PortID:            portID,
-			}
-
-			if loadBalancerIP != "" {
-				glog.V(4).Infof("creating a new floating ip %s", loadBalancerIP)
-				floatIPOpts.FloatingIP = loadBalancerIP
-			}
-
-			floatIP, err = floatingips.Create(lbaas.network, floatIPOpts).Extract()
-			if err != nil {
-				return nil, fmt.Errorf("error creating LB floatingip %+v: %v", floatIPOpts, err)
-			}
-		}
 	}
 
 	status := &v1.LoadBalancerStatus{}
